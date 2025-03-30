@@ -223,3 +223,9 @@ def add_cors_headers(response):
 if __name__ == '__main__':
     threading.Thread(target=capture_frames, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, threaded=True)
+
+# to run ngrok server:
+# ngrok http --url=mallard-learning-feline.ngrok-free.app 5000 
+
+# localtunnel server:
+# lt --port 5000 --subdomain comp4537g2
