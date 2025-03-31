@@ -11,9 +11,17 @@ import numpy as np
 
 # Initialize Flask app and Tello drone
 app = Flask(__name__)
-# from flask_cors import CORS
-# CORS(app)
+
 # Add CORS support
+from flask_cors import CORS
+CORS(app, resources={
+  r"/*": {
+    "origins": "*",  # Or 'https://nice-flower-0dc97321e.6.azurestaticapps.net'
+    "allow_headers": ["Content-Type", "Authorization", "bypass-tunnel-reminder"],
+    "methods": ["GET", "POST", "PUT", "DELETE"]
+  }
+})
+
 
 tello = Tello()
 tello.connect()
@@ -27,6 +35,7 @@ model = YOLO(model_path)
 # Global variables
 frame = None
 lock = threading.Lock()
+face_detection_enabled = False
 tracking_enabled = False
 selected_face_id = 1 # Default to first face if theres only one detected
 pError = 0  # Previous error for PI controller
@@ -68,58 +77,65 @@ def capture_frames():
         if new_frame is not None:
             # Resize to 320x240 for processing
             resized_frame_bgr = cv2.resize(new_frame, (320, 240))
+
             # Convert to RGB for the model
             resized_frame_rgb = cv2.cvtColor(resized_frame_bgr, cv2.COLOR_BGR2RGB)
-            # Prepare image for YOLO
-            pil_img = Image.fromarray(resized_frame_rgb)
-            # Run face detection
-            output = model(pil_img)
-            results = Detections.from_ultralytics(output[0])
-
-            # Process detections to find all faces
-            myFaceList = []
-            for box in results.xyxy:
-                x1, y1, x2, y2 = map(int, box)
-                w_box = x2 - x1
-                h_box = y2 - y1
-                cx = x1 + w_box // 2
-                cy = y1 + h_box // 2
-                area = w_box * h_box
-                myFaceList.append({'box': [x1, y1, x2, y2], 'center': [cx, cy], 'area': area})
-
-            # Sort faces by x-coordinate (left to right)
-            myFaceList.sort(key=lambda x: x['center'][0])
-
-            # Assign IDs
-            for i, face in enumerate(myFaceList):
-                face['id'] = i + 1
-
-            with lock:
-                current_faces = [{'id': face['id'], 'center': face['center'], 'area': face['area']} for face in myFaceList]
-
-            # Control drone if tracking is enabled and a face is selected
-            if tracking_enabled and selected_face_id is not None:
-                selected_face = next((face for face in myFaceList if face['id'] == selected_face_id), None)
-                if selected_face:
-                    info = [selected_face['center'], selected_face['area']]
-                    pError = trackFace(info, w, pid, pError)
-                else:
-                    tello.send_rc_control(0, 0, 0, 0)  # Hover if selected face not found
-            else:
-                tello.send_rc_control(0, 0, 0, 0)  # Hover when not tracking
 
             # Resize to 640x480 for display
             display_frame = cv2.resize(resized_frame_rgb, (640, 480))
-            # Draw bounding boxes with IDs on display frame
-            for face in myFaceList:
-                x1, y1, x2, y2 = face['box']
-                # Scale coordinates to 640x480
-                x1_display = x1 * 2
-                y1_display = y1 * 2
-                x2_display = x2 * 2
-                y2_display = y2 * 2
-                cv2.rectangle(display_frame, (x1_display, y1_display), (x2_display, y2_display), (0, 0, 255), 2)
-                cv2.putText(display_frame, f"Face {face['id']}", (x1_display, y1_display - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+            if face_detection_enabled:
+                # Prepare image for YOLO
+                pil_img = Image.fromarray(resized_frame_rgb)
+                # Run face detection
+                output = model(pil_img)
+                results = Detections.from_ultralytics(output[0])
+
+                # Process detections to find all faces
+                myFaceList = []
+                for box in results.xyxy:
+                    x1, y1, x2, y2 = map(int, box)
+                    w_box = x2 - x1
+                    h_box = y2 - y1
+                    cx = x1 + w_box // 2
+                    cy = y1 + h_box // 2
+                    area = w_box * h_box
+                    myFaceList.append({'box': [x1, y1, x2, y2], 'center': [cx, cy], 'area': area})
+
+                # Sort faces by x-coordinate (left to right)
+                myFaceList.sort(key=lambda x: x['center'][0])
+
+                # Assign IDs
+                for i, face in enumerate(myFaceList):
+                    face['id'] = i + 1
+
+                with lock:
+                    current_faces = [{'id': face['id'], 'center': face['center'], 'area': face['area']} for face in myFaceList]
+
+                            # Draw bounding boxes with IDs on display frame
+                for face in myFaceList:
+                    x1, y1, x2, y2 = face['box']
+                    # Scale coordinates to 640x480
+                    x1_display = x1 * 2
+                    y1_display = y1 * 2
+                    x2_display = x2 * 2
+                    y2_display = y2 * 2
+                    cv2.rectangle(display_frame, (x1_display, y1_display), (x2_display, y2_display), (0, 0, 255), 2)
+                    cv2.putText(display_frame, f"Face {face['id']}", (x1_display, y1_display - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                # Control drone if tracking is enabled and a face is selected
+                if tracking_enabled and selected_face_id is not None:
+                    selected_face = next((face for face in myFaceList if face['id'] == selected_face_id), None)
+                    if selected_face:
+                        info = [selected_face['center'], selected_face['area']]
+                        pError = trackFace(info, w, pid, pError)
+                    else:
+                        tello.send_rc_control(0, 0, 0, 0)  # Hover if selected face not found
+                else:
+                    tello.send_rc_control(0, 0, 0, 0)  # Hover when not tracking
+            else:
+                with lock:
+                    current_faces = []
 
             with lock:
                 frame = display_frame
@@ -139,12 +155,12 @@ def generate_frames():
         time.sleep(0.03)  # Control streaming frame rate
 
 # Route for video feed
-@app.route('/video_feed')
+@app.route('/v1/video_feed')
 def video_feed():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # Route for manual control (disabled during tracking)
-@app.route('/control', methods=['POST'])
+@app.route('/v1/control', methods=['POST'])
 def control():
     if tracking_enabled:
         return 'Manual controls disabled while tracking', 403
@@ -181,15 +197,28 @@ def control():
         tello.land()
     return 'OK', 200
 
+# Route to toggle face detection
+@app.route('/drone/v1/toggle-face-detection', methods=['GET'])
+def toggle_face_detection():
+    global face_detection_enabled, tracking_enabled
+    face_detection_enabled = not face_detection_enabled
+    if not face_detection_enabled:
+        tracking_enabled = False  # Disable tracking when face detection is off
+    print(f"#########################\n          Face detection enabled: {face_detection_enabled}           \n#####################")
+    return jsonify({'face_detection': face_detection_enabled, 'tracking': tracking_enabled})
+
 # Route to toggle face tracking
-@app.route('/toggle_tracking', methods=['GET'])
+@app.route('/drone/v1/toggle-face-tracking', methods=['GET'])
 def toggle_tracking():
     global tracking_enabled
+    if not tracking_enabled and not face_detection_enabled:
+        return 'Face detection must be enabled to start tracking', 403
     tracking_enabled = not tracking_enabled
+    print(f"#########################\n          Tracking enabled: {tracking_enabled}           \n#####################")
     return jsonify({'tracking': tracking_enabled})
 
 # Route to select face for tracking
-@app.route('/select_face', methods=['POST'])
+@app.route('/v1/select_face', methods=['POST'])
 def select_face():
     global selected_face_id
     data = request.get_json()
@@ -198,7 +227,7 @@ def select_face():
     return 'OK', 200
 
 # Route to get telemetry data
-@app.route('/telemetry')
+@app.route('/v1/telemetry')
 def telemetry():
     battery = tello.get_battery()
     height = tello.get_height()
@@ -208,16 +237,16 @@ def telemetry():
     })
 
 # Route to get detected faces
-@app.route('/faces')
+@app.route('/v1/faces')
 def faces():
     with lock:
         return jsonify(current_faces)
 
-@app.after_request
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    return response
+# @app.after_request
+# def add_cors_headers(response):
+#     response.headers['Access-Control-Allow-Origin'] = '*'
+#     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+#     return response
 
 # Start the frame capture thread and run the app
 if __name__ == '__main__':
